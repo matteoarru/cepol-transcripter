@@ -1,7 +1,42 @@
 """Central configuration — all constants and runtime settings live here."""
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# .env loader — sets os.environ for any key not already present in the shell
+# ---------------------------------------------------------------------------
+
+def load_env(env_path: Path | None = None) -> None:
+    """Load variables from a .env file into os.environ without overwriting.
+
+    Shell-set variables always take precedence over .env values.  If the .env
+    file is absent the function is a no-op, so the app works in environments
+    (CI, Docker) that inject secrets via the shell.
+
+    Args:
+        env_path: Path to the .env file.  Defaults to ``<project_root>/.env``.
+    """
+    if env_path is None:
+        env_path = Path(__file__).parent.parent / ".env"
+
+    if not env_path.is_file():
+        return
+
+    with env_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # Only set if the variable is not already in the environment
+            if key and key not in os.environ and value:
+                os.environ[key] = value
 
 
 # ---------------------------------------------------------------------------

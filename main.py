@@ -18,6 +18,9 @@ The pipeline:
 
 import logging
 import sys
+
+from src.config import load_env
+load_env()  # populate os.environ from .env before any other import reads it
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path

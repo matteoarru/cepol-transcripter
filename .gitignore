@@ -35,6 +35,9 @@ htmlcov/
 # Temporary ffmpeg chunks
 cepol_chunk_*/
 
+# Secrets — never commit
+.env
+
 # Editor / IDE
 .vscode/
 .idea/
