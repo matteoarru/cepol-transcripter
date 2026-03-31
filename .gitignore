@@ -1,0 +1,47 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Transcription outputs (do not track generated files)
+# Exclude transcript outputs but keep project text files
+**/*.txt
+!requirements.txt
+!README.md
+!TECHNICAL.md
+**/*.srt
+
+# Temporary ffmpeg chunks
+cepol_chunk_*/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Model cache (large binary files)
+models/
+~/.cache/huggingface/
