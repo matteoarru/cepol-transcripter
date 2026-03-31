@@ -22,9 +22,60 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 
+# Suffix used for the cached audio sidecar produced from video files.
+AUDIO_CACHE_SUFFIX = ".audio.wav"
+
+
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
+
+def cached_audio_path(source: Path) -> Path:
+    """Return the expected sidecar WAV path for a video file.
+
+    The sidecar lives next to the source:
+    ``interview.mp4`` → ``interview.audio.wav``
+
+    Args:
+        source: Original video file path.
+
+    Returns:
+        Sidecar WAV :class:`~pathlib.Path` (may or may not exist yet).
+    """
+    return source.parent / (source.stem + AUDIO_CACHE_SUFFIX)
+
+
+def prepare_audio(source: Path) -> tuple[Path, bool]:
+    """Return an audio-only WAV path ready for chunking, caching when needed.
+
+    * **Audio files** are returned unchanged — no conversion required.
+    * **Video files** are extracted to a sidecar ``*.audio.wav`` once.
+      On subsequent calls the sidecar is reused if it exists and is newer
+      than the source, avoiding redundant ffmpeg decoding.
+
+    Args:
+        source: Input media file (audio or video).
+
+    Returns:
+        Tuple of ``(audio_path, was_cached)`` where ``was_cached`` is
+        ``True`` when an existing sidecar was reused.
+
+    Raises:
+        RuntimeError: When ffmpeg extraction fails.
+    """
+    if not is_video(source):
+        return source, False
+
+    sidecar = cached_audio_path(source)
+
+    if sidecar.exists() and sidecar.stat().st_mtime >= source.stat().st_mtime:
+        logger.info("Audio cache hit: %s", sidecar.name)
+        return sidecar, True
+
+    logger.info("Extracting audio: %s → %s", source.name, sidecar.name)
+    extract_audio(source, sidecar)
+    return sidecar, False
+
 
 def is_video(path: Path) -> bool:
     """Return True when *path* is a video file.

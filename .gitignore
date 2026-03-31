@@ -24,6 +24,9 @@ htmlcov/
 # Logs
 *.log
 
+# Cached audio extracted from video files (reused across runs)
+*.audio.wav
+
 # Transcription outputs (do not track generated files)
 # Exclude transcript outputs but keep project text files
 **/*.txt
