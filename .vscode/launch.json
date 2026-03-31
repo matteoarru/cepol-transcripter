@@ -1,0 +1,61 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Transcribe sample_media",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "${workspaceFolder}/sample_media",
+                "--model", "large-v3-turbo",
+                "--chunk-size", "1800",
+                "--log-level", "DEBUG"
+            ],
+            "python": "${workspaceFolder}/venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Transcribe sample_media (fast/int8)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "${workspaceFolder}/sample_media",
+                "--model", "large-v3-turbo",
+                "--compute-type", "int8_float16",
+                "--chunk-size", "600",
+                "--log-level", "INFO"
+            ],
+            "python": "${workspaceFolder}/venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Transcribe sample_media (CPU fallback)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "${workspaceFolder}/sample_media",
+                "--model", "large-v3-turbo",
+                "--device", "cpu",
+                "--compute-type", "int8",
+                "--log-level", "DEBUG"
+            ],
+            "python": "${workspaceFolder}/venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ]
+}

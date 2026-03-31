@@ -38,8 +38,13 @@ cepol_chunk_*/
 # Secrets — never commit
 .env
 
+# Test media — drop files here for local testing, never commit
+sample_media/*
+!sample_media/.gitkeep
+
 # Editor / IDE
-.vscode/
+.vscode/*
+!.vscode/launch.json
 .idea/
 *.swp
 *.swo
