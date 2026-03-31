@@ -10,7 +10,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Tuple
 
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel
@@ -59,7 +59,7 @@ class TranscriptionResult:
         elapsed:        Wall-clock time taken to transcribe (seconds).
     """
 
-    segments: List[Segment] = field(default_factory=list)
+    segments: list[Segment] = field(default_factory=list)
     duration: float = 0.0
     language: str = "en"
     elapsed: float = 0.0
@@ -107,7 +107,7 @@ def transcribe_chunk(
     audio_path: Path,
     time_offset: float,
     config: TranscriptionConfig,
-) -> List[Segment]:
+) -> list[Segment]:
     """Transcribe one audio chunk and return absolute-timestamp segments.
 
     The *time_offset* is added to every segment's start/end so that the
@@ -143,7 +143,7 @@ def transcribe_chunk(
         without_timestamps=False,
     )
 
-    segments: List[Segment] = []
+    segments: list[Segment] = []
     for seg in segments_iter:
         text = seg.text.strip()
         if not text:
@@ -170,9 +170,9 @@ def transcribe_file(
     model: "WhisperModel",
     media_path: Path,
     duration: float,
-    chunk_offsets_and_paths,   # Iterable[Tuple[Path, float]] from audio.audio_chunks
+    chunk_offsets_and_paths: Iterable[Tuple[Path, float]],
     config: TranscriptionConfig,
-    on_chunk_done=None,        # Optional[Callable[[int, int], None]]
+    on_chunk_done: Optional[Callable[[int, float], None]] = None,
 ) -> TranscriptionResult:
     """Transcribe all chunks of a media file and merge into one result.
 
@@ -192,7 +192,7 @@ def transcribe_file(
         :class:`TranscriptionResult` with merged segments.
     """
     t_start = time.monotonic()
-    all_segments: List[Segment] = []
+    all_segments: list[Segment] = []
     detected_language = config.language
 
     for chunk_index, (chunk_path, offset) in enumerate(chunk_offsets_and_paths):
