@@ -48,6 +48,7 @@ sample_media/*
 # Editor / IDE
 .vscode/*
 !.vscode/launch.json
+!.vscode/settings.json
 .idea/
 *.swp
 *.swo
