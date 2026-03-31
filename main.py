@@ -24,7 +24,7 @@ load_env()  # populate os.environ from .env before any other import reads it
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List
+from typing import Generator, Tuple
 
 from tqdm import tqdm
 
@@ -90,27 +90,32 @@ def process_file(media_path: Path, config, model=None) -> dict:
 
         # Stream chunks through the context manager; each chunk is a temp WAV.
         with audio_chunks(media_path, config.chunk_size, config.max_duration) as chunk_iter:
-            total_chunks = max(1, int(duration / config.chunk_size) + 1)
-
             chunk_bar = tqdm(
-                chunk_iter,
-                total=total_chunks,
+                total=int(duration),
                 desc=f"  {media_path.name[:40]}",
-                unit="chunk",
+                unit="s",
+                bar_format=(
+                    "{l_bar}{bar}| {percentage:3.0f}% "
+                    "{n:.0f}/{total:.0f}s "
+                    "[{elapsed}<{remaining}, {rate_fmt}]"
+                ),
                 leave=False,
                 dynamic_ncols=True,
             )
 
-            result: TranscriptionResult = transcribe_file(
-                model=model,
-                media_path=media_path,
-                duration=duration,
-                chunk_offsets_and_paths=chunk_bar,
-                config=config,
-                on_chunk_done=lambda idx, elapsed: logger.debug(
-                    "    chunk %d done in %.1fs", idx, elapsed
-                ),
-            )
+            with chunk_bar:
+                result: TranscriptionResult = transcribe_file(
+                    model=model,
+                    media_path=media_path,
+                    duration=duration,
+                    chunk_offsets_and_paths=_with_progress(
+                        chunk_iter, chunk_bar, config.chunk_size, duration
+                    ),
+                    config=config,
+                    on_chunk_done=lambda idx, elapsed: logger.debug(
+                        "    chunk %d done in %.1fs", idx, elapsed
+                    ),
+                )
 
         txt_path = media_path.with_suffix(".txt")
         srt_path = media_path.with_suffix(".srt")
@@ -163,7 +168,7 @@ def run(root: Path, config, log_level: str = "INFO") -> None:
 
     logger.info("Found %d file(s) to process.", total_files)
 
-    results: List[dict] = []
+    results: list[dict] = []
     wall_start = time.monotonic()
 
     if config.workers == 1:
@@ -201,7 +206,31 @@ def run(root: Path, config, log_level: str = "INFO") -> None:
     _print_summary(results, time.monotonic() - wall_start)
 
 
-def _print_summary(results: List[dict], total_elapsed: float) -> None:
+def _with_progress(
+    chunk_iter,
+    bar: tqdm,
+    chunk_size: int,
+    total_duration: float,
+) -> Generator[Tuple[Path, float], None, None]:
+    """Wrap a chunk iterator so the tqdm bar advances by audio seconds per chunk.
+
+    Execution resumes after each ``yield`` only when ``transcribe_file``
+    requests the next chunk — meaning the bar updates exactly once per chunk,
+    immediately after that chunk has been transcribed.
+
+    Args:
+        chunk_iter:     Iterator of ``(chunk_path, offset)`` from audio_chunks.
+        bar:            tqdm instance with ``total`` set to file duration (s).
+        chunk_size:     Configured maximum chunk length in seconds.
+        total_duration: Total file duration in seconds (used to cap last chunk).
+    """
+    for chunk_path, offset in chunk_iter:
+        yield chunk_path, offset
+        processed = min(float(chunk_size), total_duration - offset)
+        bar.update(int(processed))
+
+
+def _print_summary(results: list[dict], total_elapsed: float) -> None:
     """Log a structured final summary to stdout.
 
     Args:
