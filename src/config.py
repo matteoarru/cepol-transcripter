@@ -39,6 +39,30 @@ def load_env(env_path: Path | None = None) -> None:
                 os.environ[key] = value
 
 
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Read an integer from the environment, clamping when bounds are set."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Supported file extensions
 # ---------------------------------------------------------------------------
@@ -56,9 +80,18 @@ DEFAULT_MODEL: str = "large-v3-turbo"
 DEFAULT_COMPUTE_TYPE: str = "float16"
 DEFAULT_DEVICE: str = "cuda"
 DEFAULT_LANGUAGE: str = "en"
-DEFAULT_CHUNK_SIZE_SECONDS: int = 1800   # 30 min per chunk
+DEFAULT_CHUNK_SIZE_SECONDS: int = (
+    _env_int("MEDIA_CHUNK_MINUTES", 20, minimum=1) * 60
+)
 DEFAULT_WORKERS: int = 1
 DEFAULT_VAD: bool = True
+MAX_PIPELINE_THREADS: int = 5
+DEFAULT_PIPELINE_THREADS: int = _env_int(
+    "PIPELINE_THREADS",
+    MAX_PIPELINE_THREADS,
+    minimum=1,
+    maximum=MAX_PIPELINE_THREADS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +145,7 @@ class TranscriptionConfig:
     language: str = DEFAULT_LANGUAGE
     chunk_size: int = DEFAULT_CHUNK_SIZE_SECONDS
     workers: int = DEFAULT_WORKERS
+    pipeline_threads: int = DEFAULT_PIPELINE_THREADS
     vad_filter: bool = DEFAULT_VAD
     max_duration: Optional[float] = None
     beam_size: int = BEAM_SIZE

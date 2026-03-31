@@ -4,13 +4,17 @@ All heavy lifting is delegated to ffmpeg so we never load entire audio files
 into Python memory — critical for 4-hour recordings.
 """
 
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 import json
 import logging
+import os
+import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Iterator, Tuple
+from typing import ContextManager, Generator, Iterator, Sequence, Tuple
 
 from .config import (
     FFMPEG_CHANNELS,
@@ -24,6 +28,17 @@ logger = logging.getLogger(__name__)
 
 # Suffix used for the cached audio sidecar produced from video files.
 AUDIO_CACHE_SUFFIX = ".audio.wav"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LOCAL_FFMPEG_DIR = PROJECT_ROOT / ".tools" / "ffmpeg-static"
+
+
+@dataclass(frozen=True)
+class ChunkSpec:
+    """One extraction/transcription chunk within a media file."""
+
+    index: int
+    offset: float
+    duration: float
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +117,7 @@ def get_duration(path: Path) -> float:
         RuntimeError: When ffprobe cannot read the file.
     """
     cmd = [
-        "ffprobe", "-v", "quiet",
+        _tool_binary("ffprobe"), "-v", "quiet",
         "-print_format", "json",
         "-show_format",
         str(path),
@@ -130,7 +145,7 @@ def extract_audio(source: Path, target: Path) -> None:
         RuntimeError: When ffmpeg returns a non-zero exit code.
     """
     cmd = [
-        "ffmpeg", "-y",
+        _tool_binary("ffmpeg"), "-y",
         "-i", str(source),
         "-vn",                           # drop video stream
         "-acodec", FFMPEG_CODEC,
@@ -162,7 +177,7 @@ def extract_audio_segment(
         RuntimeError: When ffmpeg returns a non-zero exit code.
     """
     cmd = [
-        "ffmpeg", "-y",
+        _tool_binary("ffmpeg"), "-y",
         "-ss", str(start_seconds),       # fast seek BEFORE input
         "-i", str(source),
         "-t", str(duration_seconds),
@@ -175,12 +190,27 @@ def extract_audio_segment(
     _run_ffmpeg(cmd, source)
 
 
-@contextmanager
+def build_chunk_plan(total_duration: float, chunk_size: int) -> list[ChunkSpec]:
+    """Return ordered chunk specifications covering *total_duration*."""
+    chunks: list[ChunkSpec] = []
+    offset = 0.0
+    chunk_index = 0
+
+    while offset < total_duration:
+        remaining = total_duration - offset
+        duration = min(float(chunk_size), remaining)
+        chunks.append(ChunkSpec(index=chunk_index, offset=offset, duration=duration))
+        offset += duration
+        chunk_index += 1
+
+    return chunks
+
+
 def audio_chunks(
     source: Path,
     chunk_size: int,
     max_duration: float | None = None,
-) -> Generator[Iterator[Tuple[Path, float]], None, None]:
+) -> ContextManager[Iterator[Tuple[Path, float]]]:
     """Context manager that yields an iterator of (temp_wav_path, time_offset).
 
     The temporary directory holding chunk wav files is cleaned up automatically
@@ -200,19 +230,65 @@ def audio_chunks(
     Yields:
         An iterator of ``(path_to_temp_wav, start_offset_seconds)`` tuples.
     """
-    total_duration = get_duration(source)
-    if max_duration is not None:
-        total_duration = min(total_duration, max_duration)
+    return audio_chunks_from_plan(
+        source,
+        _chunk_plan_for_source(source, chunk_size, max_duration),
+    )
 
+
+@contextmanager
+def audio_chunks_from_plan(
+    source: Path,
+    chunk_plan: Sequence[ChunkSpec],
+) -> Generator[Iterator[Tuple[Path, float]], None, None]:
+    """Yield sequentially extracted chunks for a precomputed plan."""
     with tempfile.TemporaryDirectory(prefix="cepol_chunk_") as tmpdir:
-        yield _chunk_iterator(source, Path(tmpdir), chunk_size, total_duration)
+        yield _chunk_iterator(source, Path(tmpdir), chunk_plan)
+
+
+def pipelined_audio_chunks(
+    source: Path,
+    chunk_size: int,
+    max_duration: float | None = None,
+    max_prefetch: int = 5,
+) -> ContextManager[Iterator[Tuple[Path, float]]]:
+    """Yield chunks while future chunks are extracted in background threads.
+
+    This keeps ffmpeg busy on upcoming chunks while the caller transcribes the
+    current one, reducing idle GPU time on long media files.
+    """
+    return pipelined_audio_chunks_from_plan(
+        source,
+        _chunk_plan_for_source(source, chunk_size, max_duration),
+        max_prefetch=max_prefetch,
+    )
+
+
+@contextmanager
+def pipelined_audio_chunks_from_plan(
+    source: Path,
+    chunk_plan: Sequence[ChunkSpec],
+    max_prefetch: int = 5,
+) -> Generator[Iterator[Tuple[Path, float]], None, None]:
+    """Yield prefetched chunks for a precomputed plan."""
+    with tempfile.TemporaryDirectory(prefix="cepol_chunk_") as tmpdir:
+        with ThreadPoolExecutor(
+            max_workers=max(1, max_prefetch),
+            thread_name_prefix="cepol_extract",
+        ) as executor:
+            yield _prefetched_chunk_iterator(
+                source,
+                Path(tmpdir),
+                chunk_plan,
+                executor,
+                max(1, max_prefetch),
+            )
 
 
 def _chunk_iterator(
     source: Path,
     tmpdir: Path,
-    chunk_size: int,
-    total_duration: float,
+    chunk_plan: Sequence[ChunkSpec],
 ) -> Iterator[Tuple[Path, float]]:
     """Internal generator that materialises and yields chunks one at a time.
 
@@ -223,39 +299,105 @@ def _chunk_iterator(
     Args:
         source:         Original media file.
         tmpdir:         Temporary directory (managed by caller).
-        chunk_size:     Maximum chunk length in seconds.
-        total_duration: Duration to process (may be capped by max_duration).
+        chunk_plan: Ordered extraction plan.
 
     Yields:
         Tuples of (chunk_wav_path, absolute_start_offset_seconds).
     """
-    offset = 0.0
-    chunk_index = 0
-
-    while offset < total_duration:
-        remaining = total_duration - offset
-        duration = min(float(chunk_size), remaining)
-        chunk_path = tmpdir / f"chunk_{chunk_index:04d}.wav"
-
-        logger.debug(
-            "Extracting chunk %d: %.1fs – %.1fs from %s",
-            chunk_index,
-            offset,
-            offset + duration,
-            source.name,
-        )
-        extract_audio_segment(source, chunk_path, offset, duration)
-
-        yield chunk_path, offset
-
+    for spec in chunk_plan:
+        chunk_path = _extract_chunk_to_path(source, tmpdir, spec)
+        yield chunk_path, spec.offset
         chunk_path.unlink(missing_ok=True)
-        offset += duration
-        chunk_index += 1
+
+
+def _prefetched_chunk_iterator(
+    source: Path,
+    tmpdir: Path,
+    chunk_plan: Sequence[ChunkSpec],
+    executor: ThreadPoolExecutor,
+    max_prefetch: int,
+) -> Iterator[Tuple[Path, float]]:
+    """Yield extracted chunks in order while prefetching future chunks."""
+    futures_by_index: dict[int, Future[Path]] = {}
+    next_to_submit = 0
+
+    def submit_next() -> None:
+        nonlocal next_to_submit
+        if next_to_submit >= len(chunk_plan):
+            return
+        spec = chunk_plan[next_to_submit]
+        futures_by_index[spec.index] = executor.submit(
+            _extract_chunk_to_path,
+            source,
+            tmpdir,
+            spec,
+        )
+        next_to_submit += 1
+
+    for _ in range(min(max_prefetch, len(chunk_plan))):
+        submit_next()
+
+    for spec in chunk_plan:
+        chunk_path = futures_by_index.pop(spec.index).result()
+        submit_next()
+        yield chunk_path, spec.offset
+        chunk_path.unlink(missing_ok=True)
+
+
+def _extract_chunk_to_path(source: Path, tmpdir: Path, spec: ChunkSpec) -> Path:
+    """Materialise one chunk WAV on disk and return its path."""
+    chunk_path = tmpdir / f"chunk_{spec.index:04d}.wav"
+    logger.debug(
+        "Extracting chunk %d: %.1fs – %.1fs from %s",
+        spec.index,
+        spec.offset,
+        spec.offset + spec.duration,
+        source.name,
+    )
+    extract_audio_segment(source, chunk_path, spec.offset, spec.duration)
+    return chunk_path
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _chunk_plan_for_source(
+    source: Path,
+    chunk_size: int,
+    max_duration: float | None,
+) -> list[ChunkSpec]:
+    """Probe source duration and return a bounded chunk plan."""
+    total_duration = get_duration(source)
+    if max_duration is not None:
+        total_duration = min(total_duration, max_duration)
+    return build_chunk_plan(total_duration, chunk_size)
+
+
+def _tool_binary(tool_name: str) -> str:
+    """Return the binary path for ffmpeg-family tools.
+
+    Resolution order:
+    1. matching environment variable (`FFMPEG_BIN` or `FFPROBE_BIN`)
+    2. tool found on `PATH`
+    3. repo-local static binary under `.tools/ffmpeg-static/`
+    4. plain command name as a last resort
+    """
+    env_name = f"{tool_name.upper()}_BIN"
+    env_value = os.environ.get(env_name, "").strip()
+    if env_value:
+        return env_value
+
+    system_path = shutil.which(tool_name)
+    if system_path:
+        return system_path
+
+    local_binary = LOCAL_FFMPEG_DIR / tool_name
+    if local_binary.is_file():
+        return str(local_binary)
+
+    return tool_name
+
 
 def _run_ffmpeg(cmd: list[str], source: Path) -> None:
     """Execute an ffmpeg command, raising RuntimeError on failure.

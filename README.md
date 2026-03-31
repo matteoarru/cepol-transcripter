@@ -10,7 +10,10 @@ Built on [faster-whisper](https://github.com/SYSTRAN/faster-whisper) with full C
 - Recursively scans a root folder for all audio and video files
 - GPU-accelerated transcription via faster-whisper (CTranslate2 backend)
 - Handles files up to 4+ hours without loading them into memory (ffmpeg-based chunking)
+- For long audio and video files, pre-extracts future chunks in background threads while the current chunk is transcribed
 - Produces `.txt` plain-text transcripts and `.srt` subtitle files
+- Saves outputs next to each source file, keeping the same basename and changing only the extension
+- Logs the exact saved output paths for each successful file
 - Skip logic: re-runs only files whose outputs are missing or stale
 - Configurable chunking, VAD filtering, model, and parallelism
 - Law-enforcement optimised: English only, preserves casing, punctuation, and technical terms
@@ -88,8 +91,9 @@ python main.py /path/to/recordings
 ```bash
 python main.py /path/to/recordings \
     --model large-v3-turbo \
-    --chunk-size 1800 \
+    --chunk-size 1200 \
     --workers 1 \
+    --pipeline-threads 5 \
     --log-level INFO
 ```
 
@@ -110,12 +114,45 @@ make test
 | `root`            | (required)        | Root folder to scan recursively                      |
 | `--model`         | `large-v3-turbo`  | Whisper model name (see model table below)           |
 | `--workers`       | `1`               | Parallel workers (use 1 for single-GPU setups)       |
-| `--chunk-size`    | `1800`            | Max chunk length in seconds (default = 30 min)       |
+| `--pipeline-threads` | `5`            | Background chunk-extraction threads for long media   |
+| `--chunk-size`    | `1200`            | Max chunk length in seconds (default = 20 min)       |
 | `--no-vad`        | VAD enabled       | Disable Voice Activity Detection filtering           |
 | `--max-duration`  | unlimited         | Cap processed duration per file (useful for testing) |
 | `--device`        | `cuda`            | `cuda` or `cpu`                                      |
 | `--compute-type`  | `float16`         | `float16`, `int8_float16`, `int8`, `float32`         |
 | `--log-level`     | `INFO`            | `DEBUG`, `INFO`, `WARNING`, `ERROR`                  |
+
+### `.env` tuning
+
+You can set defaults in `.env`:
+
+```dotenv
+MEDIA_CHUNK_MINUTES=20
+PIPELINE_THREADS=5
+```
+
+- `MEDIA_CHUNK_MINUTES` controls the default chunk slot size for long media.
+- `PIPELINE_THREADS` controls how many background ffmpeg extraction threads are used for long media.
+- CLI flags still override the `.env` defaults.
+
+## Code Structure
+
+- `main.py`: CLI entry point and top-level orchestration.
+- `src/processor.py`: single-file processing workflow.
+- `src/audio.py`: ffprobe/ffmpeg helpers, chunk planning, and pipelined extraction.
+- `src/transcriber.py`: faster-whisper integration and transcript segment DTOs.
+- `src/writer.py`: `.txt` and `.srt` formatting.
+- `src/scanner.py`: recursive media discovery and skip logic.
+- `src/output_paths.py`: single source of truth for sibling output filenames.
+
+## Development Style
+
+The codebase follows a simple clean-code and XP-friendly workflow:
+
+- Keep modules focused on one responsibility.
+- Prefer small refactors backed by tests over large rewrites.
+- Preserve one clear source of truth for shared rules such as config and output paths.
+- Verify changes with `venv/bin/python -m pytest -q` and `venv/bin/python -m pyright`.
 
 ### Model options (speed vs accuracy trade-off)
 
@@ -149,6 +186,10 @@ filed in District 4 on the 14th.
 ```
 
 ### `.srt` subtitle file
+
+For example, `/evidence/case-7/interview.mp4` produces:
+- `/evidence/case-7/interview.txt`
+- `/evidence/case-7/interview.srt`
 
 ```
 1

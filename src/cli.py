@@ -6,8 +6,10 @@ from pathlib import Path
 from .config import (
     DEFAULT_CHUNK_SIZE_SECONDS,
     DEFAULT_MODEL,
+    DEFAULT_PIPELINE_THREADS,
     DEFAULT_VAD,
     DEFAULT_WORKERS,
+    MAX_PIPELINE_THREADS,
     TranscriptionConfig,
 )
 
@@ -53,6 +55,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Number of parallel file-processing workers. "
             "Values > 1 load the model in each worker process; only "
             "recommended when multiple GPUs are available."
+        ),
+    )
+
+    parser.add_argument(
+        "--pipeline-threads",
+        type=int,
+        default=DEFAULT_PIPELINE_THREADS,
+        metavar="N",
+        dest="pipeline_threads",
+        help=(
+            "Background extraction threads for long media pipelines. "
+            f"Clamped to 1-{MAX_PIPELINE_THREADS}."
         ),
     )
 
@@ -123,6 +137,7 @@ def parse_args() -> tuple[argparse.Namespace, TranscriptionConfig]:
         compute_type=args.compute_type,
         device=args.device,
         workers=args.workers,
+        pipeline_threads=max(1, min(args.pipeline_threads, MAX_PIPELINE_THREADS)),
         chunk_size=args.chunk_size,
         vad_filter=args.vad,
         max_duration=args.max_duration,

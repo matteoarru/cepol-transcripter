@@ -4,7 +4,9 @@ import logging
 from pathlib import Path
 from typing import Iterator
 
+from .audio import AUDIO_CACHE_SUFFIX
 from .config import SUPPORTED_EXTENSIONS
+from .output_paths import transcript_output_paths
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,9 @@ def iter_media_files(root: Path) -> Iterator[Path]:
             continue
         if not path.is_file():
             continue
+        if _is_generated_audio_cache(path):
+            logger.debug("SKIP (generated audio cache): %s", path.name)
+            continue
         if _already_processed(path):
             logger.info("SKIP (already processed): %s", path.name)
             continue
@@ -44,12 +49,16 @@ def _already_processed(media_path: Path) -> bool:
     Returns:
         True if processing can safely be skipped.
     """
-    txt = media_path.with_suffix(".txt")
-    srt = media_path.with_suffix(".srt")
+    txt, srt = transcript_output_paths(media_path)
     if not txt.exists() or not srt.exists():
         return False
     source_mtime = media_path.stat().st_mtime
     return txt.stat().st_mtime > source_mtime and srt.stat().st_mtime > source_mtime
+
+
+def _is_generated_audio_cache(path: Path) -> bool:
+    """Return True for generated ``*.audio.wav`` cache sidecars."""
+    return path.name.endswith(AUDIO_CACHE_SUFFIX)
 
 
 def count_media_files(root: Path) -> int:

@@ -38,6 +38,9 @@ htmlcov/
 # Temporary ffmpeg chunks
 cepol_chunk_*/
 
+# Repo-local helper tooling downloaded for local runs
+.tools/
+
 # Secrets — never commit
 .env
 

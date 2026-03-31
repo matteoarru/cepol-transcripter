@@ -4,6 +4,7 @@ Run with:
     pytest tests/
 """
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -18,7 +19,8 @@ from src.config import (
     VIDEO_EXTENSIONS,
     TranscriptionConfig,
 )
-from src.transcriber import Segment
+from src.output_paths import transcript_output_paths
+from src.transcriber import Segment, TranscriptionResult
 from src.writer import _format_srt_timestamp, write_srt, write_txt
 
 
@@ -36,6 +38,37 @@ class TestConfig:
         assert cfg.language == "en"
         assert cfg.device == "cuda"
         assert cfg.vad_filter is True
+
+    def test_env_backed_defaults(self, monkeypatch):
+        import src.config as config_module
+
+        monkeypatch.setenv("MEDIA_CHUNK_MINUTES", "20")
+        monkeypatch.setenv("PIPELINE_THREADS", "8")
+        reloaded = importlib.reload(config_module)
+
+        try:
+            assert reloaded.DEFAULT_CHUNK_SIZE_SECONDS == 1200
+            assert reloaded.DEFAULT_PIPELINE_THREADS == 5
+            assert reloaded.TranscriptionConfig().pipeline_threads == 5
+        finally:
+            monkeypatch.delenv("MEDIA_CHUNK_MINUTES", raising=False)
+            monkeypatch.delenv("PIPELINE_THREADS", raising=False)
+            importlib.reload(config_module)
+
+
+# ---------------------------------------------------------------------------
+# output paths
+# ---------------------------------------------------------------------------
+
+class TestOutputPaths:
+    def test_transcript_output_paths_are_siblings(self, tmp_path):
+        media = tmp_path / "case01" / "interview.final.mp4"
+        media.parent.mkdir(parents=True)
+
+        txt, srt = transcript_output_paths(media)
+
+        assert txt == media.parent / "interview.final.txt"
+        assert srt == media.parent / "interview.final.srt"
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +226,15 @@ class TestIterMediaFiles:
         found = {p.name for p in iter_media_files(tmp_path)}
         assert found == {"clip.mkv", "root.mp3"}
 
+    def test_skips_generated_audio_cache_sidecars(self, tmp_path):
+        from src.scanner import iter_media_files
+
+        (tmp_path / "lecture.mp4").write_bytes(b"video")
+        (tmp_path / "lecture.audio.wav").write_bytes(b"cache")
+
+        found = {p.name for p in iter_media_files(tmp_path)}
+        assert found == {"lecture.mp4"}
+
     def test_raises_on_non_directory(self, tmp_path):
         from src.scanner import iter_media_files
 
@@ -200,3 +242,174 @@ class TestIterMediaFiles:
         f.write_text("x")
         with pytest.raises(NotADirectoryError):
             list(iter_media_files(f))
+
+
+# ---------------------------------------------------------------------------
+# audio — chunk planning / pipelining
+# ---------------------------------------------------------------------------
+
+class TestAudioChunkPipeline:
+    def test_build_chunk_plan(self):
+        from src.audio import build_chunk_plan
+
+        plan = build_chunk_plan(total_duration=125.0, chunk_size=60)
+
+        assert [(item.index, item.offset, item.duration) for item in plan] == [
+            (0, 0.0, 60.0),
+            (1, 60.0, 60.0),
+            (2, 120.0, 5.0),
+        ]
+
+    def test_pipelined_audio_chunks_yield_in_order(self, monkeypatch, tmp_path):
+        from src import audio
+
+        source = tmp_path / "video.mp4"
+        source.write_bytes(b"video")
+
+        monkeypatch.setattr(audio, "get_duration", lambda _: 125.0)
+
+        extracted: list[tuple[float, float]] = []
+
+        def fake_extract(source_path, target_path, start_seconds, duration_seconds):
+            target_path.write_text(f"{start_seconds}:{duration_seconds}")
+            extracted.append((start_seconds, duration_seconds))
+
+        monkeypatch.setattr(audio, "extract_audio_segment", fake_extract)
+
+        with audio.pipelined_audio_chunks(source, chunk_size=60, max_prefetch=3) as chunk_iter:
+            observed = [
+                (chunk_path.read_text(), offset)
+                for chunk_path, offset in chunk_iter
+            ]
+
+        assert observed == [
+            ("0.0:60.0", 0.0),
+            ("60.0:60.0", 60.0),
+            ("120.0:5.0", 120.0),
+        ]
+        assert sorted(extracted) == [
+            (0.0, 60.0),
+            (60.0, 60.0),
+            (120.0, 5.0),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# processor — single-file workflow orchestration
+# ---------------------------------------------------------------------------
+
+class TestProcessor:
+    def test_process_file_success(self, monkeypatch, tmp_path):
+        from src import processor
+
+        class FakeBar:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        media = tmp_path / "briefing.wav"
+        plan = processor.MediaProcessingPlan(
+            duration=120.0,
+            processed_duration=90.0,
+            chunk_plan=[],
+            use_pipeline=True,
+        )
+        transcription = TranscriptionResult(
+            segments=[Segment(0.0, 1.0, "Briefing started.")],
+            duration=90.0,
+            language="en",
+            elapsed=3.0,
+        )
+        txt_path = tmp_path / "briefing.txt"
+        srt_path = tmp_path / "briefing.srt"
+
+        monkeypatch.setattr(processor, "_build_processing_plan", lambda path, cfg: plan)
+        monkeypatch.setattr(processor, "_chunk_progress_bar", lambda filename, duration: FakeBar())
+        monkeypatch.setattr(processor, "load_model", lambda cfg: object())
+        monkeypatch.setattr(
+            processor,
+            "_transcribe_media",
+            lambda media_path, model, plan_obj, cfg, chunk_bar: transcription,
+        )
+        monkeypatch.setattr(
+            processor,
+            "_write_outputs",
+            lambda media_path, transcript: (txt_path, srt_path),
+        )
+        result = processor.process_file(media, TranscriptionConfig())
+
+        assert result.ok is True
+        assert result.media_path == media
+        assert result.error is None
+        assert result.txt_path == txt_path
+        assert result.srt_path == srt_path
+
+    def test_process_file_failure(self, monkeypatch, tmp_path):
+        from src import processor
+
+        class FakeBar:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        media = tmp_path / "briefing.wav"
+        plan = processor.MediaProcessingPlan(
+            duration=120.0,
+            processed_duration=90.0,
+            chunk_plan=[],
+            use_pipeline=False,
+        )
+
+        monkeypatch.setattr(processor, "_build_processing_plan", lambda path, cfg: plan)
+        monkeypatch.setattr(processor, "_chunk_progress_bar", lambda filename, duration: FakeBar())
+        monkeypatch.setattr(processor, "load_model", lambda cfg: object())
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("transcription failed")
+
+        monkeypatch.setattr(processor, "_transcribe_media", boom)
+
+        result = processor.process_file(media, TranscriptionConfig())
+
+        assert result.ok is False
+        assert result.media_path == media
+        assert result.error == "transcription failed"
+        assert result.txt_path is None
+        assert result.srt_path is None
+
+    def test_process_file_retries_on_cpu_after_cuda_failure(self, monkeypatch, tmp_path):
+        from src import processor
+
+        media = tmp_path / "briefing.wav"
+        txt_path = tmp_path / "briefing.txt"
+        srt_path = tmp_path / "briefing.srt"
+        transcription = TranscriptionResult(
+            segments=[Segment(0.0, 1.0, "Recovered on CPU.")],
+            duration=30.0,
+            language="en",
+            elapsed=2.0,
+        )
+        calls: list[tuple[str, str]] = []
+
+        def fake_load_model(cfg):
+            return f"model:{cfg.device}"
+
+        def fake_process_once(media_path, cfg, model):
+            calls.append((cfg.device, cfg.compute_type))
+            if cfg.device == "cuda":
+                raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+            return transcription, txt_path, srt_path
+
+        monkeypatch.setattr(processor, "load_model", fake_load_model)
+        monkeypatch.setattr(processor, "_process_file_once", fake_process_once)
+
+        result = processor.process_file(media, TranscriptionConfig())
+
+        assert result.ok is True
+        assert result.txt_path == txt_path
+        assert result.srt_path == srt_path
+        assert calls == [("cuda", "float16"), ("cpu", "int8")]
