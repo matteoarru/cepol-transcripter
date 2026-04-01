@@ -44,15 +44,30 @@ class TestConfig:
 
         monkeypatch.setenv("MEDIA_CHUNK_MINUTES", "20")
         monkeypatch.setenv("PIPELINE_THREADS", "8")
+        monkeypatch.setenv("CPU_THREADS", "12")
+        monkeypatch.setenv("WHISPER_BEAM_SIZE", "2")
+        monkeypatch.setenv("WHISPER_COMPUTE_TYPE", "int8_float16")
+        monkeypatch.setenv("WHISPER_VAD", "false")
+        monkeypatch.setenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", "false")
         reloaded = importlib.reload(config_module)
 
         try:
             assert reloaded.DEFAULT_CHUNK_SIZE_SECONDS == 1200
             assert reloaded.DEFAULT_PIPELINE_THREADS == 5
+            assert reloaded.DEFAULT_CPU_THREADS == 12
+            assert reloaded.BEAM_SIZE == 2
+            assert reloaded.DEFAULT_COMPUTE_TYPE == "int8_float16"
             assert reloaded.TranscriptionConfig().pipeline_threads == 5
+            assert reloaded.TranscriptionConfig().vad_filter is False
+            assert reloaded.TranscriptionConfig().condition_on_previous_text is False
         finally:
             monkeypatch.delenv("MEDIA_CHUNK_MINUTES", raising=False)
             monkeypatch.delenv("PIPELINE_THREADS", raising=False)
+            monkeypatch.delenv("CPU_THREADS", raising=False)
+            monkeypatch.delenv("WHISPER_BEAM_SIZE", raising=False)
+            monkeypatch.delenv("WHISPER_COMPUTE_TYPE", raising=False)
+            monkeypatch.delenv("WHISPER_VAD", raising=False)
+            monkeypatch.delenv("WHISPER_CONDITION_ON_PREVIOUS_TEXT", raising=False)
             importlib.reload(config_module)
 
 
@@ -295,6 +310,26 @@ class TestAudioChunkPipeline:
 
 
 # ---------------------------------------------------------------------------
+# transcriber — runtime helpers
+# ---------------------------------------------------------------------------
+
+class TestTranscriberRuntime:
+    def test_missing_cuda_runtime_libraries(self, monkeypatch):
+        from src import transcriber
+
+        available = {"libcuda.so.1"}
+        monkeypatch.setattr(
+            transcriber,
+            "_can_load_shared_library",
+            lambda name: name in available,
+        )
+
+        missing = transcriber.missing_cuda_runtime_libraries()
+
+        assert missing == ("libcublas.so.12", "libcudnn.so.9")
+
+
+# ---------------------------------------------------------------------------
 # processor — single-file workflow orchestration
 # ---------------------------------------------------------------------------
 
@@ -315,6 +350,7 @@ class TestProcessor:
             processed_duration=90.0,
             chunk_plan=[],
             use_pipeline=True,
+            source_strategy="direct_media",
         )
         transcription = TranscriptionResult(
             segments=[Segment(0.0, 1.0, "Briefing started.")],
@@ -331,7 +367,7 @@ class TestProcessor:
         monkeypatch.setattr(
             processor,
             "_transcribe_media",
-            lambda media_path, model, plan_obj, cfg, chunk_bar: transcription,
+            lambda media_path, model, plan_obj, cfg, chunk_bar, metrics: transcription,
         )
         monkeypatch.setattr(
             processor,
@@ -345,6 +381,8 @@ class TestProcessor:
         assert result.error is None
         assert result.txt_path == txt_path
         assert result.srt_path == srt_path
+        assert result.source_strategy == "direct_media"
+        assert result.metrics is not None
 
     def test_process_file_failure(self, monkeypatch, tmp_path):
         from src import processor
@@ -362,6 +400,7 @@ class TestProcessor:
             processed_duration=90.0,
             chunk_plan=[],
             use_pipeline=False,
+            source_strategy="prepared_audio",
         )
 
         monkeypatch.setattr(processor, "_build_processing_plan", lambda path, cfg: plan)
@@ -387,6 +426,13 @@ class TestProcessor:
         media = tmp_path / "briefing.wav"
         txt_path = tmp_path / "briefing.txt"
         srt_path = tmp_path / "briefing.srt"
+        plan = processor.MediaProcessingPlan(
+            duration=30.0,
+            processed_duration=30.0,
+            chunk_plan=[],
+            use_pipeline=False,
+            source_strategy="direct_media",
+        )
         transcription = TranscriptionResult(
             segments=[Segment(0.0, 1.0, "Recovered on CPU.")],
             duration=30.0,
@@ -398,11 +444,11 @@ class TestProcessor:
         def fake_load_model(cfg):
             return f"model:{cfg.device}"
 
-        def fake_process_once(media_path, cfg, model):
+        def fake_process_once(media_path, cfg, model, metrics=None):
             calls.append((cfg.device, cfg.compute_type))
             if cfg.device == "cuda":
                 raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
-            return transcription, txt_path, srt_path
+            return transcription, txt_path, srt_path, plan
 
         monkeypatch.setattr(processor, "load_model", fake_load_model)
         monkeypatch.setattr(processor, "_process_file_once", fake_process_once)
@@ -413,3 +459,32 @@ class TestProcessor:
         assert result.txt_path == txt_path
         assert result.srt_path == srt_path
         assert calls == [("cuda", "float16"), ("cpu", "int8")]
+
+    def test_build_processing_plan_prefers_cached_audio_for_long_video(self, monkeypatch, tmp_path):
+        from src import processor
+
+        media = tmp_path / "briefing.mp4"
+        media.write_bytes(b"video")
+        cache = tmp_path / "briefing.audio.wav"
+        cache.write_bytes(b"cache")
+
+        monkeypatch.setattr(processor, "get_duration", lambda path: 180.0)
+
+        plan = processor._build_processing_plan(
+            media,
+            TranscriptionConfig(chunk_size=60, pipeline_threads=3),
+        )
+
+        assert plan.use_pipeline is True
+        assert plan.source_strategy == "cached_audio"
+
+    def test_worker_slot_uses_process_identity(self, monkeypatch):
+        from src import processor
+
+        class FakeProcess:
+            _identity = (3,)
+            name = "ForkProcess-3"
+
+        monkeypatch.setattr(processor, "current_process", lambda: FakeProcess())
+
+        assert processor._worker_slot(2) == 0

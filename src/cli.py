@@ -3,12 +3,20 @@
 import argparse
 from pathlib import Path
 
+from . import __version__
 from .config import (
     DEFAULT_CHUNK_SIZE_SECONDS,
+    DEFAULT_COMPUTE_TYPE,
+    DEFAULT_CPU_THREADS,
+    DEFAULT_DEVICE,
     DEFAULT_MODEL,
     DEFAULT_PIPELINE_THREADS,
     DEFAULT_VAD,
     DEFAULT_WORKERS,
+    ALLOWED_COMPUTE_TYPES,
+    BEAM_SIZE,
+    BEST_OF,
+    CONDITION_ON_PREVIOUS_TEXT,
     MAX_PIPELINE_THREADS,
     TranscriptionConfig,
 )
@@ -36,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+
+    parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
         metavar="NAME",
@@ -55,6 +69,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Number of parallel file-processing workers. "
             "Values > 1 load the model in each worker process; only "
             "recommended when multiple GPUs are available."
+        ),
+    )
+
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=DEFAULT_CPU_THREADS,
+        metavar="N",
+        dest="cpu_threads",
+        help=(
+            "CPU threads used by CTranslate2. "
+            "In CPU mode this is the main throughput knob; in multi-worker CPU "
+            "runs it is divided across workers."
         ),
     )
 
@@ -88,6 +115,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--beam-size",
+        type=int,
+        default=BEAM_SIZE,
+        metavar="N",
+        dest="beam_size",
+        help="Beam size for decoding. Lower values are faster but may reduce quality.",
+    )
+
+    parser.add_argument(
+        "--best-of",
+        type=int,
+        default=BEST_OF,
+        metavar="N",
+        dest="best_of",
+        help="Number of candidates when sampling-based decoding is used.",
+    )
+
+    parser.add_argument(
+        "--no-condition-on-previous-text",
+        action="store_false",
+        dest="condition_on_previous_text",
+        default=CONDITION_ON_PREVIOUS_TEXT,
+        help=(
+            "Disable cross-chunk text conditioning. This can improve speed and "
+            "reduce error propagation between chunks."
+        ),
+    )
+
+    parser.add_argument(
         "--max-duration",
         type=float,
         default=None,
@@ -98,15 +154,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--device",
-        default="cuda",
+        default=DEFAULT_DEVICE,
         choices=["cuda", "cpu"],
         help="Inference device.",
     )
 
     parser.add_argument(
         "--compute-type",
-        default="float16",
-        choices=["float16", "int8_float16", "int8", "float32"],
+        default=DEFAULT_COMPUTE_TYPE,
+        choices=sorted(ALLOWED_COMPUTE_TYPES),
         dest="compute_type",
         help="Quantisation / compute type for the model.",
     )
@@ -137,10 +193,14 @@ def parse_args() -> tuple[argparse.Namespace, TranscriptionConfig]:
         compute_type=args.compute_type,
         device=args.device,
         workers=args.workers,
+        cpu_threads=max(1, args.cpu_threads),
         pipeline_threads=max(1, min(args.pipeline_threads, MAX_PIPELINE_THREADS)),
         chunk_size=args.chunk_size,
         vad_filter=args.vad,
         max_duration=args.max_duration,
+        beam_size=max(1, args.beam_size),
+        best_of=max(1, args.best_of),
+        condition_on_previous_text=args.condition_on_previous_text,
     )
 
     return args, config

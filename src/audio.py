@@ -12,9 +12,10 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import ContextManager, Generator, Iterator, Sequence, Tuple
+from typing import Callable, ContextManager, Generator, Iterator, Sequence, Tuple
 
 from .config import (
     FFMPEG_CHANNELS,
@@ -90,6 +91,15 @@ def prepare_audio(source: Path) -> tuple[Path, bool]:
     logger.info("Extracting audio: %s → %s", source.name, sidecar.name)
     extract_audio(source, sidecar)
     return sidecar, False
+
+
+def has_reusable_audio_cache(source: Path) -> bool:
+    """Return True when a video's cached sidecar exists and is up to date."""
+    if not is_video(source):
+        return False
+
+    sidecar = cached_audio_path(source)
+    return sidecar.exists() and sidecar.stat().st_mtime >= source.stat().st_mtime
 
 
 def is_video(path: Path) -> bool:
@@ -240,10 +250,11 @@ def audio_chunks(
 def audio_chunks_from_plan(
     source: Path,
     chunk_plan: Sequence[ChunkSpec],
+    on_chunk_extracted: Callable[[ChunkSpec, float], None] | None = None,
 ) -> Generator[Iterator[Tuple[Path, float]], None, None]:
     """Yield sequentially extracted chunks for a precomputed plan."""
     with tempfile.TemporaryDirectory(prefix="cepol_chunk_") as tmpdir:
-        yield _chunk_iterator(source, Path(tmpdir), chunk_plan)
+        yield _chunk_iterator(source, Path(tmpdir), chunk_plan, on_chunk_extracted)
 
 
 def pipelined_audio_chunks(
@@ -269,6 +280,7 @@ def pipelined_audio_chunks_from_plan(
     source: Path,
     chunk_plan: Sequence[ChunkSpec],
     max_prefetch: int = 5,
+    on_chunk_extracted: Callable[[ChunkSpec, float], None] | None = None,
 ) -> Generator[Iterator[Tuple[Path, float]], None, None]:
     """Yield prefetched chunks for a precomputed plan."""
     with tempfile.TemporaryDirectory(prefix="cepol_chunk_") as tmpdir:
@@ -282,6 +294,7 @@ def pipelined_audio_chunks_from_plan(
                 chunk_plan,
                 executor,
                 max(1, max_prefetch),
+                on_chunk_extracted,
             )
 
 
@@ -289,6 +302,7 @@ def _chunk_iterator(
     source: Path,
     tmpdir: Path,
     chunk_plan: Sequence[ChunkSpec],
+    on_chunk_extracted: Callable[[ChunkSpec, float], None] | None,
 ) -> Iterator[Tuple[Path, float]]:
     """Internal generator that materialises and yields chunks one at a time.
 
@@ -305,7 +319,7 @@ def _chunk_iterator(
         Tuples of (chunk_wav_path, absolute_start_offset_seconds).
     """
     for spec in chunk_plan:
-        chunk_path = _extract_chunk_to_path(source, tmpdir, spec)
+        chunk_path = _extract_chunk_to_path(source, tmpdir, spec, on_chunk_extracted)
         yield chunk_path, spec.offset
         chunk_path.unlink(missing_ok=True)
 
@@ -316,6 +330,7 @@ def _prefetched_chunk_iterator(
     chunk_plan: Sequence[ChunkSpec],
     executor: ThreadPoolExecutor,
     max_prefetch: int,
+    on_chunk_extracted: Callable[[ChunkSpec, float], None] | None,
 ) -> Iterator[Tuple[Path, float]]:
     """Yield extracted chunks in order while prefetching future chunks."""
     futures_by_index: dict[int, Future[Path]] = {}
@@ -331,6 +346,7 @@ def _prefetched_chunk_iterator(
             source,
             tmpdir,
             spec,
+            on_chunk_extracted,
         )
         next_to_submit += 1
 
@@ -344,9 +360,15 @@ def _prefetched_chunk_iterator(
         chunk_path.unlink(missing_ok=True)
 
 
-def _extract_chunk_to_path(source: Path, tmpdir: Path, spec: ChunkSpec) -> Path:
+def _extract_chunk_to_path(
+    source: Path,
+    tmpdir: Path,
+    spec: ChunkSpec,
+    on_chunk_extracted: Callable[[ChunkSpec, float], None] | None,
+) -> Path:
     """Materialise one chunk WAV on disk and return its path."""
     chunk_path = tmpdir / f"chunk_{spec.index:04d}.wav"
+    started_at = time.monotonic()
     logger.debug(
         "Extracting chunk %d: %.1fs – %.1fs from %s",
         spec.index,
@@ -355,6 +377,8 @@ def _extract_chunk_to_path(source: Path, tmpdir: Path, spec: ChunkSpec) -> Path:
         source.name,
     )
     extract_audio_segment(source, chunk_path, spec.offset, spec.duration)
+    if on_chunk_extracted is not None:
+        on_chunk_extracted(spec, time.monotonic() - started_at)
     return chunk_path
 
 

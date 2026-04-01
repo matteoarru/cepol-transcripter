@@ -1,5 +1,7 @@
 # CEPOL Transcripter — Technical Notes
 
+Release covered by this document: `v2.0.0`
+
 ## Overview
 
 The application is a batch transcription pipeline for audio and video evidence.
@@ -13,6 +15,8 @@ The current design emphasizes:
 - Small refactors backed by tests.
 - Explicit configuration instead of hidden runtime state.
 - Bounded memory and disk usage for long recordings.
+- Fast startup failure detection when the CUDA runtime is broken.
+- Reusing loaded models instead of reloading them for every file.
 
 ## Architecture
 
@@ -36,8 +40,9 @@ Owns only top-level orchestration:
 
 - configure logging
 - scan for pending files
-- load one model per process
-- dispatch per-file work
+- probe the runtime once at startup and normalize unsafe device settings
+- load one model per process or per worker
+- dispatch per-file work with worker-local model caching
 - print the final summary
 
 ### `src/config.py`
@@ -45,7 +50,7 @@ Owns only top-level orchestration:
 Owns runtime configuration and environment-backed defaults:
 
 - `.env` loading
-- integer env parsing and clamping
+- integer / boolean / CSV env parsing and clamping
 - transcription defaults
 - ffmpeg and inference constants
 
@@ -63,8 +68,10 @@ Owns the single-file workflow:
 
 - inspect media duration
 - choose sequential vs pipelined chunk extraction
+- choose whether chunks should come from direct media, prepared audio, or cached sidecar audio
 - drive chunk-level progress reporting
 - call `transcribe_file`
+- capture per-file performance timings
 - write output files
 - return a structured processing result
 
@@ -77,12 +84,16 @@ Owns ffprobe/ffmpeg integration:
 - build chunk plans
 - stream sequential chunks
 - prefetch future chunks in background threads for long media
+- report extraction timings back to the processor
 
 ### `src/transcriber.py`
 
 Owns faster-whisper integration:
 
 - load the model
+- bootstrap Python-packaged CUDA runtime libraries when present
+- detect missing CUDA runtime libraries
+- warm up the model with a tiny startup probe when CUDA is requested
 - transcribe a chunk
 - normalize chunk-relative timestamps into source-relative timestamps
 - aggregate chunk results into `TranscriptionResult`
@@ -119,16 +130,21 @@ For each pending media file:
 2. It computes the effective processing duration, applying `--max-duration`
    when present.
 3. It builds a chunk plan from that duration and the configured chunk size.
-4. It chooses one of two chunk strategies:
-   - Sequential path: prepare cached sidecar audio for videos, then extract
-     chunks one at a time.
-   - Pipelined path: keep the original media as the source and prefetch future
-     chunk WAV files in background threads while the current chunk is being
-     transcribed.
+4. It chooses a chunk source and execution strategy:
+   - `prepared_audio`: for shorter videos, extract or reuse one sibling
+     `*.audio.wav` sidecar first, then chunk that normalized audio source.
+   - `cached_audio`: for long videos with an already-valid sidecar cache,
+     keep the pipeline but extract chunks from the cached WAV instead of
+     repeatedly seeking inside the video container.
+   - `direct_media`: for long first-run media, chunk directly from the source
+     so ffmpeg extraction can overlap with Whisper inference immediately.
 5. `transcriber.py` receives `(chunk_path, offset)` pairs and returns absolute
    transcript segments.
 6. `writer.py` writes sibling `.txt` and `.srt` files.
-7. `main.py` includes the saved output paths in the final summary.
+7. `processor.py` records per-file timings for probing, preparation,
+   extraction, transcription, and writing.
+8. `main.py` includes the saved output paths and aggregate timing totals in the
+   final summary.
 
 ## Chunking Strategy
 
@@ -167,6 +183,93 @@ The app submits future chunk extractions to a bounded `ThreadPoolExecutor`.
 Chunks are still yielded to the transcriber in source order, but ffmpeg can
 work ahead while Whisper is busy on the current chunk. This reduces GPU idle
 time without requiring multiple model instances.
+
+When a valid sibling `*.audio.wav` sidecar already exists for a long video, the
+pipeline adapts and uses that cache as the chunk source. That preserves the
+overlap benefits of pipelining while avoiding repeated video decode work.
+
+## Runtime Preparation
+
+Before the first real media file starts, `main.py` runs a one-time runtime
+preparation step.
+
+If `device=cuda`:
+
+- it checks which CUDA devices are visible
+- it checks whether the required userspace libraries can be loaded
+- it warms up the model with a tiny silent transcription
+
+If any of those checks fail with a CUDA runtime error, the app falls back once
+to `device=cpu` and `compute_type=int8` instead of failing repeatedly per file.
+
+## Multi-worker Model Reuse
+
+The original multi-process path submitted one file per task and each task could
+load its own model. The current design uses worker initialization:
+
+- one worker process starts
+- that worker loads one model once
+- all files executed by that worker reuse the same model
+
+In CUDA mode, workers are pinned to visible GPUs through `device_index`, and
+the worker count is capped to the number of visible GPUs. In CPU mode, the app
+automatically reduces `cpu_threads` per worker to avoid oversubscribing the
+host.
+
+## Performance Metrics
+
+Each successful file logs a timing breakdown:
+
+- model load
+- ffprobe / planning
+- source preparation
+- chunk extraction
+- transcription
+- output writing
+
+The final summary aggregates those timings across the whole batch. Extraction
+and transcription totals are intentionally reported separately even though they
+can overlap during pipelined runs.
+
+## Benchmark Notes
+
+The `v2.0.0` release adds benchmark-backed tuning guidance for batch servers.
+
+Local benchmark environment:
+
+- Ubuntu 24.04.4 LTS
+- NVIDIA RTX 5000 Ada Generation with 32 GB VRAM
+- NVIDIA driver `570.211.01`, CUDA `12.8`
+- `ffmpeg 6.1.1`
+- model: `large-v3-turbo`
+
+Method:
+
+- process two isolated copies of the 74.9-minute sample media in one run
+- keep `workers=1` and `pipeline_threads=5`
+- warm model downloads ahead of time
+- compare runtime and decoding settings, not model size
+
+Findings:
+
+- `--no-condition-on-previous-text` produced the largest single speedup.
+- `int8_float16` beat `float16` once decoding was simplified.
+- `--no-vad` was fastest on the benchmark sample because the content was dense speech.
+- ffmpeg extraction remained a much smaller cost than transcription.
+
+Measured top results:
+
+| Configuration | Wall time | Throughput |
+|---------------|-----------|------------|
+| `int8_float16 + beam_size=1 + no_condition_on_previous_text + no_vad` | `54.4s` | `165.2x` |
+| `float16 + beam_size=1 + no_condition_on_previous_text + no_vad` | `59.2s` | `151.8x` |
+| `int8_float16 + beam_size=1 + no_condition_on_previous_text` | `65.1s` | `138.1x` |
+| previous baseline defaults | `90.0s` | `99.9x` |
+
+That is why the documentation now recommends two explicit profiles:
+
+- fastest profile for dense-speech batch jobs
+- safer throughput profile for mixed real-world corpora
 
 ## Output Rules
 
@@ -211,6 +314,7 @@ Shared rules are centralized:
 - output naming lives in `src/output_paths.py`
 - environment integer parsing lives in `src/config.py`
 - chunk-plan construction lives in `src/audio.py`
+- runtime probing lives in `src/transcriber.py`
 
 ### Small, Named Functions
 
@@ -218,7 +322,7 @@ The per-file workflow is expressed through focused helpers such as:
 
 - `_build_processing_plan`
 - `_transcribe_media`
-- `_prepare_chunk_source`
+- `_resolve_chunk_source`
 - `_write_outputs`
 - `_log_processing_complete`
 
