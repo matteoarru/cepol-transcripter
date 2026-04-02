@@ -163,6 +163,8 @@ Both launchers use the project's virtual environment and forward any extra CLI f
 ./run.sh --version
 ```
 
+For unattended daily runs on Ubuntu, see [SCHEDULING.md](/home/matteo/projects/cepol-transcripter/SCHEDULING.md).
+
 ### With options
 
 ```bash
