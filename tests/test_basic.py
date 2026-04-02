@@ -20,6 +20,7 @@ from src.config import (
     TranscriptionConfig,
 )
 from src.output_paths import transcript_output_paths
+from src.output_paths import transcript_outputs_exist
 from src.transcriber import Segment, TranscriptionResult
 from src.writer import _format_srt_timestamp, write_srt, write_txt
 
@@ -84,6 +85,19 @@ class TestOutputPaths:
 
         assert txt == media.parent / "interview.final.txt"
         assert srt == media.parent / "interview.final.srt"
+
+    def test_transcript_outputs_exist_requires_both_files(self, tmp_path):
+        media = tmp_path / "case01" / "interview.final.mp4"
+        media.parent.mkdir(parents=True)
+
+        assert transcript_outputs_exist(media) is False
+
+        txt, srt = transcript_output_paths(media)
+        txt.write_text("transcript")
+        assert transcript_outputs_exist(media) is False
+
+        srt.write_text("subtitle")
+        assert transcript_outputs_exist(media) is True
 
 
 # ---------------------------------------------------------------------------
@@ -189,11 +203,23 @@ class TestSkipLogic:
         txt.write_text("transcript")
         srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
 
-        # Make outputs newer than the source
-        import os, time as t
+        assert _already_processed(media) is True
+
+    def test_already_processed_ignores_source_mtime(self, tmp_path):
+        from src.scanner import _already_processed
+
+        media = tmp_path / "video.mp4"
+        media.write_bytes(b"fake")
+        txt = tmp_path / "video.txt"
+        srt = tmp_path / "video.srt"
+        txt.write_text("transcript")
+        srt.write_text("subtitle")
+
+        import os
+        import time as t
+
         future = t.time() + 10
-        os.utime(txt, (future, future))
-        os.utime(srt, (future, future))
+        os.utime(media, (future, future))
 
         assert _already_processed(media) is True
 
@@ -459,6 +485,55 @@ class TestProcessor:
         assert result.txt_path == txt_path
         assert result.srt_path == srt_path
         assert calls == [("cuda", "float16"), ("cpu", "int8")]
+
+    def test_process_file_removes_audio_cache_after_success(self, monkeypatch, tmp_path):
+        from src import processor
+
+        class FakeBar:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        media = tmp_path / "briefing.mp4"
+        media.write_bytes(b"video")
+        sidecar = tmp_path / "briefing.audio.wav"
+        sidecar.write_bytes(b"cache")
+        txt_path = tmp_path / "briefing.txt"
+        srt_path = tmp_path / "briefing.srt"
+        plan = processor.MediaProcessingPlan(
+            duration=30.0,
+            processed_duration=30.0,
+            chunk_plan=[],
+            use_pipeline=False,
+            source_strategy="prepared_audio",
+        )
+        transcription = TranscriptionResult(
+            segments=[Segment(0.0, 1.0, "Completed.")],
+            duration=30.0,
+            language="en",
+            elapsed=2.0,
+        )
+
+        monkeypatch.setattr(processor, "_build_processing_plan", lambda path, cfg: plan)
+        monkeypatch.setattr(processor, "_chunk_progress_bar", lambda filename, duration: FakeBar())
+        monkeypatch.setattr(processor, "load_model", lambda cfg: object())
+        monkeypatch.setattr(
+            processor,
+            "_transcribe_media",
+            lambda media_path, model, plan_obj, cfg, chunk_bar, metrics: transcription,
+        )
+        monkeypatch.setattr(
+            processor,
+            "_write_outputs",
+            lambda media_path, transcript: (txt_path, srt_path),
+        )
+
+        result = processor.process_file(media, TranscriptionConfig())
+
+        assert result.ok is True
+        assert sidecar.exists() is False
 
     def test_build_processing_plan_prefers_cached_audio_for_long_video(self, monkeypatch, tmp_path):
         from src import processor

@@ -26,7 +26,8 @@ Current release: `v2.0.0`
 - Saves outputs next to each source file, keeping the same basename and changing only the extension
 - Logs the exact saved output paths for each successful file
 - Logs stage-level timing breakdowns for probing, preparation, extraction, transcription, and writing
-- Skip logic: re-runs only files whose outputs are missing or stale
+- Skip logic: does not reprocess files when both sibling `.txt` and `.srt` outputs already exist
+- Removes generated sibling `*.audio.wav` files after a successful transcription run
 - Configurable chunking, VAD filtering, model, and parallelism
 - Law-enforcement optimised: English only, preserves casing, punctuation, and technical terms
 
@@ -38,6 +39,9 @@ Current release: `v2.0.0`
 |----------|-------------------------|
 | Audio    | `.wav` `.mp3` `.m4a` `.flac` |
 | Video    | `.mp4` `.mkv` `.avi` `.mov`  |
+
+Extension matching is case-insensitive, so files such as `INTERVIEW.MP4` and
+`audio.WAV` are processed normally.
 
 ---
 
@@ -136,6 +140,27 @@ source venv/bin/activate
 
 ```bash
 python main.py /path/to/recordings
+```
+
+### Launcher scripts
+
+Linux / macOS:
+
+```bash
+./run.sh /path/to/recordings
+```
+
+Windows:
+
+```bat
+run.bat C:\path\to\recordings
+```
+
+Both launchers use the project's virtual environment and forward any extra CLI flags:
+
+```bash
+./run.sh sample_media --log-level INFO
+./run.sh --version
 ```
 
 ### With options

@@ -112,7 +112,7 @@ Owns filesystem scanning and skip logic only:
 
 - recursive media discovery
 - extension filtering
-- "already processed" checks
+- "already processed" checks based on sibling `.txt` and `.srt` existence
 
 ### `src/output_paths.py`
 
@@ -171,9 +171,10 @@ The CLI can still override these defaults with `--chunk-size` and
 
 Used for shorter files or when chunk prefetching is disabled.
 
-For videos, the app can reuse a cached sibling `*.audio.wav` sidecar when it is
-already newer than the source video. This avoids repeated full-audio extraction
-across runs.
+For videos, the app can reuse a sibling `*.audio.wav` sidecar within the current
+processing flow when one is already present, for example after an interrupted
+run. Successful runs clean up that sidecar after writing `.txt` and `.srt`
+outputs.
 
 ### Pipelined
 
@@ -184,9 +185,10 @@ Chunks are still yielded to the transcriber in source order, but ffmpeg can
 work ahead while Whisper is busy on the current chunk. This reduces GPU idle
 time without requiring multiple model instances.
 
-When a valid sibling `*.audio.wav` sidecar already exists for a long video, the
-pipeline adapts and uses that cache as the chunk source. That preserves the
-overlap benefits of pipelining while avoiding repeated video decode work.
+When a sibling `*.audio.wav` sidecar already exists for a long video, the
+pipeline adapts and uses that sidecar as the chunk source. That preserves the
+overlap benefits of pipelining while avoiding repeated video decode work during
+the active run.
 
 ## Runtime Preparation
 
@@ -284,6 +286,10 @@ Outputs always live next to the source media file:
 This rule is centralized in `src/output_paths.py`, and both writing and skip
 logic use the same helper. That avoids duplication and keeps naming behavior
 consistent.
+
+Generated `*.audio.wav` files are treated as transient working files. After a
+successful transcription, `src/processor.py` removes the sidecar so only the
+source media plus final `.txt` and `.srt` outputs remain.
 
 ## Error Handling
 

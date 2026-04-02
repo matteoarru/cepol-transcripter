@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Generator, Optional, Sequence
 from tqdm import tqdm
 
 from .audio import (
+    cached_audio_path,
     audio_chunks_from_plan,
     build_chunk_plan,
     get_duration,
@@ -227,6 +228,7 @@ def _process_file_once(
         write_started_at = time.monotonic()
         txt_path, srt_path = _write_outputs(media_path, transcription)
         active_metrics.write_elapsed += time.monotonic() - write_started_at
+        _cleanup_generated_audio_cache(media_path)
 
     return transcription, txt_path, srt_path, plan
 
@@ -377,6 +379,24 @@ def _write_outputs(
     logger.info("OUTPUT TXT: %s", txt_path)
     logger.info("OUTPUT SRT: %s", srt_path)
     return txt_path, srt_path
+
+
+def _cleanup_generated_audio_cache(media_path: Path) -> None:
+    """Remove the sibling ``*.audio.wav`` sidecar after a successful run."""
+    if not is_video(media_path):
+        return
+
+    sidecar = cached_audio_path(media_path)
+    if not sidecar.exists():
+        return
+
+    try:
+        sidecar.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not remove audio cache %s: %s", sidecar, exc)
+        return
+
+    logger.info("CLEANUP AUDIO CACHE: %s", sidecar)
 
 
 def _log_processing_complete(

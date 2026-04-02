@@ -6,7 +6,7 @@ from typing import Iterator
 
 from .audio import AUDIO_CACHE_SUFFIX
 from .config import SUPPORTED_EXTENSIONS
-from .output_paths import transcript_output_paths
+from .output_paths import transcript_outputs_exist
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 def iter_media_files(root: Path) -> Iterator[Path]:
     """Yield every supported media file found recursively under *root*.
 
-    Files whose sibling .txt AND .srt outputs are both newer than the source
-    are skipped (resume / skip logic).
+    Files whose sibling .txt AND .srt outputs both exist are skipped
+    (resume / skip logic).
 
     Args:
         root: Directory to search recursively.
@@ -41,7 +41,7 @@ def iter_media_files(root: Path) -> Iterator[Path]:
 
 
 def _already_processed(media_path: Path) -> bool:
-    """Return True when both output files exist and are newer than the source.
+    """Return True when both output files already exist.
 
     Args:
         media_path: Path to the media file being evaluated.
@@ -49,11 +49,7 @@ def _already_processed(media_path: Path) -> bool:
     Returns:
         True if processing can safely be skipped.
     """
-    txt, srt = transcript_output_paths(media_path)
-    if not txt.exists() or not srt.exists():
-        return False
-    source_mtime = media_path.stat().st_mtime
-    return txt.stat().st_mtime > source_mtime and srt.stat().st_mtime > source_mtime
+    return transcript_outputs_exist(media_path)
 
 
 def _is_generated_audio_cache(path: Path) -> bool:
